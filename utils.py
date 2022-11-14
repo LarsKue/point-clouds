@@ -40,3 +40,13 @@ def std_except(x: torch.Tensor, *dim):
 
 def std_except_batch(x):
     return std_except(x, 0)
+
+
+def norm_except(x, *dim):
+    return _except(torch.norm, x, *dim)
+
+
+def norm_except_batch(x):
+    return norm_except(x, 0)
+
+

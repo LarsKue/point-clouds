@@ -13,6 +13,10 @@ from scipy.integrate import RK45
 import utils
 
 
+
+
+
+
 class RectifyingFlow(lightning.LightningModule):
     def __init__(self, train_data=None, val_data=None, test_data=None, **hparams):
         super().__init__()
@@ -76,6 +80,7 @@ class RectifyingFlow(lightning.LightningModule):
     def default_hparams(self):
         return dict(
             batch_size=1,
+            time_samples=1,
             optimizer="adam",
             learning_rate=1e-3,
             weight_decay=1e-5,
@@ -113,14 +118,13 @@ class RectifyingFlow(lightning.LightningModule):
 
         x1 = self.distribution.sample((batch_size,)).to(self.device)
 
-        shape = torch.ones(x0.dim(), dtype=torch.int32).tolist()
-        shape[0] = batch_size
-        t = torch.rand(*shape).to(self.device)
+        t = torch.rand(*x0.shape, self.hparams.time_samples).to(self.device)
 
-        xt = t * x1 + (1 - t) * x0
+        xt = t * x1[..., None] + (1 - t) * x0[..., None]
+        xt = xt.movedim(-1, 1).flatten(start_dim=0, end_dim=1)
 
         predicted = self.net(xt, time=t)
-        true = x1 - x0
+        true = (x1 - x0).repeat(self.hparams.time_samples, 1)
 
         return predicted, true
 
@@ -275,20 +279,10 @@ class Subnet(nn.Module):
 from torch.utils.data import Dataset
 
 
-class SingleTensorDataset(TensorDataset):
-    def __getitem__(self, item):
-        return super().__getitem__(item)[0]
 
 
-class PairedDataset(Dataset):
-    def __init__(self, *datasets: Dataset):
-        self.datasets = datasets
 
-    def __len__(self):
-        return min([len(d) for d in self.datasets])
 
-    def __getitem__(self, item):
-        return tuple(d[item] for d in self.datasets)
 
 
 class ProductSet(Dataset):
