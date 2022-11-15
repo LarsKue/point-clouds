@@ -1,4 +1,6 @@
 
+from sklearn.datasets import make_blobs
+
 
 x = (3, 0, 3)
 

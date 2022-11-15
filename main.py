@@ -285,17 +285,7 @@ from torch.utils.data import Dataset
 
 
 
-class ProductSet(Dataset):
-    def __init__(self, d1: Dataset, d2: Dataset):
-        self.d1 = d1
-        self.d2 = d2
 
-    def __len__(self):
-        return len(self.d1) * len(self.d2)
-
-    def __getitem__(self, item):
-        i, j = item % len(self.d1), item // len(self.d1)
-        return self.d1[i], self.d2[j]
 
 
 

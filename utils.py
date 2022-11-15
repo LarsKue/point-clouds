@@ -50,3 +50,34 @@ def norm_except_batch(x):
     return norm_except(x, 0)
 
 
+def repeat_as(x1: torch.Tensor, x2: torch.Tensor):
+    """ Repeat x1 to match the shape of x2 """
+    s1 = torch.tensor(x1.shape)
+    s2 = torch.tensor(x2.shape)
+
+    div = s2 // s1
+    mod = s2 % s1
+    if torch.any(torch.nonzero(mod)):
+        raise RuntimeError(f"Cannot repeat tensor of shape {x1.shape} to match {x2.shape}.")
+
+    return x1.repeat(div.tolist())
+
+
+def unsqueeze_to(x: torch.Tensor, dim: int, side="right"):
+    """ Unsqueeze x1 on the right to match the given dimensionality """
+    if dim < x.dim():
+        raise RuntimeError(f"Cannot unsqueeze tensor of dim {x.dim()} to {dim}.")
+
+    idx = [None] * (dim - x.dim())
+    if side == "right":
+        idx = [..., *idx]
+    elif side == "left":
+        idx = [*idx, ...]
+    else:
+        raise ValueError(f"Unknown side: {side}")
+
+    return x[idx]
+
+
+def unsqueeze_as(x1: torch.Tensor, x2: torch.Tensor):
+    return unsqueeze_to(x1, x2.dim())

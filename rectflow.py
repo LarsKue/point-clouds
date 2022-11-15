@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 
 
 from integrators import EulerIntegrator, RK45Integrator
+import utils
 
 
 class RectifyingFlow(lightning.LightningModule):
@@ -17,6 +18,7 @@ class RectifyingFlow(lightning.LightningModule):
         return dict(
             input_shape=(),
             batch_size=1,
+            sample_size=1,
             optimizer="adam",
             learning_rate=1e-3,
             weight_decay=1e-5,
@@ -39,7 +41,7 @@ class RectifyingFlow(lightning.LightningModule):
         self.integrator = self.configure_integrator()
 
     def forward(self, x: torch.Tensor, steps: int = 100) -> torch.Tensor:
-        """ Full Forward Inference, use to rectify flow """
+        """ Full Forward Inference """
         device = x.device
 
         x = x.to(self.device)
@@ -49,7 +51,7 @@ class RectifyingFlow(lightning.LightningModule):
         return z.to(device)
 
     def inverse(self, z: torch.Tensor, steps: int = 100) -> torch.Tensor:
-        """ Full Inverse Inference, use after training """
+        """ Full Inverse Inference """
         device = z.device
 
         z = z.to(self.device)
@@ -62,12 +64,19 @@ class RectifyingFlow(lightning.LightningModule):
         """ Compute predicted and target force for a given batch """
         x0, x1 = batch
 
-        t = torch.rand_like(x0)
+        sample_size = self.hparams.sample_size
+        batch_size = x0.shape[0]
+        input_shape = self.hparams.input_shape
+
+        t = torch.rand(sample_size, batch_size).to(self.device)
+        t = utils.unsqueeze_to(t, x0.dim() + 1, side="right")
+
         xt = t * x1 + (1 - t) * x0
+        xt = xt.reshape(sample_size * batch_size, *input_shape)
 
         predicted = self.network.forward(xt)
-
         target = x1 - x0
+        target = utils.repeat_as(target, predicted)
 
         return predicted, target
 
