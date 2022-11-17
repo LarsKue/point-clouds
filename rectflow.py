@@ -25,6 +25,7 @@ class RectifyingFlow(lightning.LightningModule):
             integrator="euler",
             network_widths=[],
             kernel_sizes=[],
+            activation="relu",
         )
 
     def __init__(self, train_data=None, val_data=None, test_data=None, **hparams):
@@ -45,8 +46,10 @@ class RectifyingFlow(lightning.LightningModule):
         device = x.device
 
         x = x.to(self.device)
-        dt = 1.0 / steps
-        z = self.integrator.solve(f=self.network, x0=x, dt=dt, steps=steps)
+        t0 = torch.zeros(x.shape[0], device=self.device)
+        t0 = utils.unsqueeze_as(t0, x)
+        dt = torch.tensor(1.0 / steps)
+        z = self.integrator.solve(f=self.velocity, x0=x, t0=t0, dt=dt, steps=steps)
 
         return z.to(device)
 
@@ -55,10 +58,18 @@ class RectifyingFlow(lightning.LightningModule):
         device = z.device
 
         z = z.to(self.device)
-        dt = -1.0 / steps
-        x = self.integrator.solve(f=self.network, x0=z, dt=dt, steps=steps)
+        t0 = torch.ones(z.shape[0], device=self.device)
+        t0 = utils.unsqueeze_as(t0, z)
+        dt = torch.tensor(-1.0 / steps, device=self.device)
+        x = self.integrator.solve(f=self.velocity, x0=z, t0=t0, dt=dt, steps=steps)
 
         return x.to(device)
+
+    def velocity(self, x: torch.Tensor, time: torch.Tensor):
+        """ Compute the velocity at given x, t """
+        xt = torch.cat((x, time), dim=1)
+
+        return self.network.forward(xt)
 
     def inference_step(self, batch, batch_idx=None):
         """ Compute predicted and target force for a given batch """
@@ -66,17 +77,17 @@ class RectifyingFlow(lightning.LightningModule):
 
         sample_size = self.hparams.sample_size
         batch_size = x0.shape[0]
-        input_shape = self.hparams.input_shape
 
-        t = torch.rand(sample_size, batch_size).to(self.device)
-        t = utils.unsqueeze_to(t, x0.dim() + 1, side="right")
+        t = torch.rand(sample_size * batch_size).to(self.device)
+        t = utils.unsqueeze_as(t, x0)
+
+        x0 = utils.repeat_dim(x0, sample_size, dim=0)
+        x1 = utils.repeat_dim(x1, sample_size, dim=0)
 
         xt = t * x1 + (1 - t) * x0
-        xt = xt.reshape(sample_size * batch_size, *input_shape)
 
-        predicted = self.network.forward(xt)
+        predicted = self.velocity(xt, time=t)
         target = x1 - x0
-        target = utils.repeat_as(target, predicted)
 
         return predicted, target
 
@@ -139,9 +150,9 @@ class RectifyingFlow(lightning.LightningModule):
         """ Detect input shape and construct according network """
         match self.hparams.input_shape:
             case (int(dim),):
-                network = self.configure_dense_network(dim, dim)
+                network = self.configure_dense_network(dim + 1, dim)
             case (int(channels), int(height), int(width)):
-                network = self.configure_conv_network(channels, channels)
+                network = self.configure_conv_network(channels + 1, channels)
             case shape:
                 raise NotImplementedError(f"Unsupported Input Shape: {shape}")
 
@@ -150,19 +161,30 @@ class RectifyingFlow(lightning.LightningModule):
     def configure_dense_network(self, in_features, out_features):
         """ Construct a dense network from given hparams """
         assert len(self.hparams.network_widths) > 0
+
+        match self.hparams.activation.lower():
+            case "relu":
+                Activation = nn.ReLU
+            case "elu":
+                Activation = nn.ELU
+            case "selu":
+                Activation = nn.SELU
+            case activation:
+                raise NotImplementedError(f"Unsupported Activation: {activation}")
+
         network = nn.Sequential()
 
         in_layer = nn.Linear(in_features=in_features, out_features=self.hparams.network_widths[0])
         network.add_module("Input Layer", in_layer)
 
-        relu = nn.ReLU()
-        network.add_module(f"Input Activation", relu)
+        activation = Activation()
+        network.add_module(f"Input Activation", activation)
 
         for i in range(len(self.hparams.network_widths) - 1):
             linear = nn.Linear(in_features=self.hparams.network_widths[i], out_features=self.hparams.network_widths[i + 1])
             network.add_module(f"Hidden Layer {i}", linear)
-            relu = nn.ReLU()
-            network.add_module(f"Hidden Activation {i}", relu)
+            activation = Activation()
+            network.add_module(f"Hidden Activation {i}", activation)
 
         out_layer = nn.Linear(in_features=self.hparams.network_widths[-1], out_features=out_features)
         network.add_module("Output Layer", out_layer)
@@ -173,19 +195,30 @@ class RectifyingFlow(lightning.LightningModule):
         """ Construct a convolutional network from given hparams """
         assert len(self.hparams.network_widths) > 0
         assert len(self.hparams.kernel_sizes) == len(self.hparams.network_widths) + 1
+
+        match self.hparams.activation.lower():
+            case "relu":
+                Activation = nn.ReLU
+            case "elu":
+                Activation = nn.ELU
+            case "selu":
+                Activation = nn.SELU
+            case activation:
+                raise NotImplementedError(f"Unsupported Activation: {activation}")
+
         network = nn.Sequential()
 
         in_layer = nn.Conv2d(in_channels=in_channels, out_channels=self.hparams.network_widths[0], kernel_size=self.hparams.kernel_sizes[0], padding="same")
         network.add_module("Input Layer", in_layer)
 
-        relu = nn.ReLU()
-        network.add_module(f"Input Activation", relu)
+        activation = Activation()
+        network.add_module(f"Input Activation", activation)
 
         for i in range(len(self.hparams.network_widths) - 1):
             conv = nn.Conv2d(in_channels=self.hparams.network_widths[i], out_channels=self.hparams.network_widths[i + 1], kernel_size=self.hparams.kernel_sizes[i + 1], padding="same")
             network.add_module(f"Hidden Layer {i}", conv)
-            relu = nn.ReLU()
-            network.add_module(f"Hidden Activation {i}", relu)
+            activation = Activation()
+            network.add_module(f"Hidden Activation {i}", activation)
 
         out_layer = nn.Conv2d(in_channels=self.hparams.network_widths[-1], out_channels=out_channels, kernel_size=self.hparams.kernel_sizes[-1], padding="same")
         network.add_module("Output Layer", out_layer)
