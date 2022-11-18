@@ -49,7 +49,7 @@ class RectifyingFlow(lightning.LightningModule):
         t0 = torch.zeros(x.shape[0], device=self.device)
         t0 = utils.unsqueeze_as(t0, x)
         dt = torch.tensor(1.0 / steps)
-        z = self.integrator.solve(f=self.velocity, x0=x, t0=t0, dt=dt, steps=steps)
+        z, _t = self.integrator.solve(f=self.velocity, x0=x, t0=t0, dt=dt, steps=steps)
 
         return z.to(device)
 
@@ -61,7 +61,7 @@ class RectifyingFlow(lightning.LightningModule):
         t0 = torch.ones(z.shape[0], device=self.device)
         t0 = utils.unsqueeze_as(t0, z)
         dt = torch.tensor(-1.0 / steps, device=self.device)
-        x = self.integrator.solve(f=self.velocity, x0=z, t0=t0, dt=dt, steps=steps)
+        x, _t = self.integrator.solve(f=self.velocity, x0=z, t0=t0, dt=dt, steps=steps)
 
         return x.to(device)
 

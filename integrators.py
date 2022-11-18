@@ -8,13 +8,13 @@ class Integrator:
     def step(self, f: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], x: torch.Tensor, t: torch.Tensor, dt: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
-    def solve(self, f: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], x0: torch.Tensor, t0: torch.Tensor, dt: torch.Tensor, steps: int):
+    def solve(self, f: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], x0: torch.Tensor, t0: torch.Tensor, dt: torch.Tensor, steps: int) -> Tuple[torch.Tensor, torch.Tensor]:
         x = x0
         t = t0
         for step in range(steps):
             x, t = self.step(f, x, t, dt)
 
-        return x
+        return x, t
 
 
 class EulerIntegrator(Integrator):
