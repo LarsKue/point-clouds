@@ -3,11 +3,14 @@
 import pytorch_lightning as lightning
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 from torch.utils.data import DataLoader
 
 from torchvision.datasets import MNIST
 
 import utils
+import losses
 
 from encoder import Encoder
 from integrators import EulerIntegrator, RK45Integrator
@@ -28,11 +31,14 @@ class PointCloudsModule(lightning.LightningModule):
             weight_decay=1e-5,
             encoder_widths=[],
             rectifier_widths=[],
-            activation="relu"
+            activation="relu",
+            integrator="euler",
+            beta=0.5,
         )
 
     def __init__(self, train_data=None, val_data=None, test_data=None, **hparams):
         super().__init__()
+        hparams = self.default_hparams | hparams
         self.save_hyperparameters(hparams)
 
         self.train_data = train_data
@@ -46,59 +52,67 @@ class PointCloudsModule(lightning.LightningModule):
         self.rectifier_distribution = self.configure_rectifier_distribution()
 
     def inference_step(self, batch, batch_idx=None):
-        points = batch
+        # (shapes, points, dim)
+        points = utils.normalize(batch)
 
-        n_shapes, n_points, _ = points.shape
+        n_shapes, n_points, n_dim = points.shape
 
-        target_noise = self.rectifier_distribution.sample((n_shapes, n_points))
-        target_noise = target_noise.to(self.device)
+        # (shapes, points, dim)
+        target_noise = self.rectifier_distribution.sample((n_shapes, n_points)).to(self.device)
 
+        # (shapes, condition_dim)
         condition = self.encoder.forward(points)
 
-        sample_size = self.hparams.sample_size
-        time = torch.randn(n_shapes * sample_size)
+        # (shapes, 1, 1)
+        time = torch.rand(n_shapes).to(self.device)
         time = utils.unsqueeze_as(time, points)
 
-        target_noise = utils.repeat_dim(target_noise, sample_size, dim=0)
-        points = utils.repeat_dim(points, sample_size, dim=0)
-        condition = utils.repeat_dim(condition, sample_size, dim=0)
-
+        # (shapes, points, dim)
         interpolation = time * target_noise + (1 - time) * points
 
+        # (shapes, points, dim)
         v = self.rectifier.velocity(interpolation, time=time, condition=condition)
 
+        # (shapes, points, dim)
         v_target = target_noise - points
 
-        encoder_loss = -self.encoder_distribution.log_prob(condition)
-        rectifier_loss = utils.mean_except_batch(torch.square(v - v_target))
+        # (shapes, condition_dim)
+        encoder_noise = self.encoder_distribution.sample((n_shapes,)).to(self.device)
 
-        beta = self.hparams.beta
-        loss = beta * encoder_loss + (1 - beta) * rectifier_loss
+        # encoder_loss = losses.mmd(condition[:, 0], encoder_noise)
+        encoder_loss = losses._mmd(condition)
 
-        return loss.mean(dim=0)
+        # (,)
+        rectifier_loss = F.mse_loss(v, v_target)
+
+        return encoder_loss, rectifier_loss
 
     def sample(self, n_shapes: int, n_points: int, steps: int = 100):
-        condition = self.encoder_distribution.sample((n_shapes,))
-        condition = condition.to(self.device)
+        condition = self.encoder_distribution.sample((n_shapes,)).to(self.device)
 
-        noise = self.rectifier_distribution.sample((n_shapes, n_points))
-        noise = noise.to(self.device)
+        noise = self.rectifier_distribution.sample((n_shapes, n_points)).to(self.device)
 
         points, _time = self.rectifier.inverse(noise, condition=condition, steps=steps)
 
         return points
 
     def training_step(self, batch, batch_idx=None):
-        loss = self.inference_step(batch, batch_idx)
+        encoder_loss, rectifier_loss = self.inference_step(batch, batch_idx)
+        self.log("encoder_loss", encoder_loss)
+        self.log("rectifier_loss", rectifier_loss)
+
+        beta = self.hparams.beta
+        loss = beta * encoder_loss + (1 - beta) * rectifier_loss
         self.log("training_loss", loss)
 
         return loss
 
     def validation_step(self, batch, batch_idx=None):
-        loss = self.inference_step(batch, batch_idx)
-        self.log("validation_loss", loss)
+        encoder_loss, rectifier_loss = self.inference_step(batch, batch_idx)
 
-        return loss
+        beta = self.hparams.beta
+        loss = beta * encoder_loss + (1 - beta) * rectifier_loss
+        self.log("validation_loss", loss)
 
     def configure_encoder(self):
         input_dim = self.hparams.input_dim
@@ -152,8 +166,8 @@ class PointCloudsModule(lightning.LightningModule):
 
         network = nn.Sequential()
 
-        # input is x, condition, time
-        input_layer = nn.Linear(in_features=input_dim + condition_dim + 1, out_features=widths[0])
+        # input is x, time, condition
+        input_layer = nn.Linear(in_features=input_dim + 1 + condition_dim, out_features=widths[0])
         network.add_module("Input Layer", input_layer)
 
         activation = Activation()
@@ -187,13 +201,13 @@ class PointCloudsModule(lightning.LightningModule):
         return integrator
 
     def configure_encoder_distribution(self) -> torch.distributions.Distribution:
-        loc = torch.zeros(self.hparams.condition_dim)
-        scale = torch.ones(self.hparams.condition_dim)
+        loc = torch.zeros(self.hparams.condition_dim).cuda()
+        scale = torch.ones(self.hparams.condition_dim).cuda()
         return torch.distributions.Normal(loc, scale)
 
     def configure_rectifier_distribution(self) -> torch.distributions.Distribution:
-        loc = torch.zeros(self.hparams.input_dim)
-        scale = torch.ones(self.hparams.input_dim)
+        loc = torch.zeros(self.hparams.input_dim).cuda()
+        scale = torch.ones(self.hparams.input_dim).cuda()
         return torch.distributions.Normal(loc, scale)
 
     def configure_optimizers(self):

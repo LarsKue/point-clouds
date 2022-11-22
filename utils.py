@@ -91,3 +91,10 @@ def unsqueeze_to(x: torch.Tensor, dim: int, side="right"):
 
 def unsqueeze_as(x1: torch.Tensor, x2: torch.Tensor, **kwargs):
     return unsqueeze_to(x1, x2.dim(), **kwargs)
+
+
+def normalize(x: torch.Tensor):
+    mean = torch.mean(x, dim=0, keepdim=True)
+    std = torch.std(x, dim=0, keepdim=True)
+
+    return (x - mean) / std

@@ -101,3 +101,34 @@ def maximum_mean_discrepancy_code(code, n_z_draws=300, latent_dist=tf.random.nor
     z = latent_dist(shape=(n_z_draws, code.shape[1]))
     mmd = weight * mmd_kernel(code, z, kernel=kernel) 
     return mmd
+
+
+
+def _gaussian_kernel_matrix(x, y, sigmas=None):
+    """ Computes a Gaussian Radial Basis Kernel between the samples of x and y.
+
+    We create a sum of multiple Gaussian kernels each having a width :math:`\sigma_i`.
+
+    Parameters
+    ----------
+    x      :  tf.Tensor of shape (N, num_features)
+    y      :  tf.Tensor of shape (M, num_features)
+    sigmas :  list(float), optional, default: None (use default)
+        List which denotes the widths of each of the Gaussians in the kernel.
+
+    Returns
+    -------
+    kernel : tf.Tensor
+        RBF kernel of shape [num_samples{x}, num_samples{y}]
+    """
+
+    if sigmas is None:
+        sigmas = MMD_BANDWIDTH_LIST
+    norm = lambda v: tf.reduce_sum(tf.square(v), 1)
+    beta = 1. / (2. * (tf.expand_dims(sigmas, 1)))
+    dist = tf.transpose(norm(tf.expand_dims(x, 2) - tf.transpose(y)))
+    s = tf.matmul(beta, tf.reshape(dist, (1, -1)))
+    kernel = tf.reshape(tf.reduce_sum(tf.exp(-s), 0), tf.shape(dist))
+    return kernel
+
+
