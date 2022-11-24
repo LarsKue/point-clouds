@@ -13,7 +13,7 @@ def gaussian_kernel(x1: torch.Tensor, x2: torch.Tensor, scales: torch.Tensor) ->
     norms = torch.sum(torch.square(residuals), dim=-1)
 
     # (N, M, K)
-    exponent = norms[:, :, None] / scales[None, None, :]
+    exponent = norms[:, :, None] / (2.0 * scales[None, None, :])
 
     # (N, M)
     return torch.sum(torch.exp(-exponent), dim=-1)
@@ -41,8 +41,12 @@ def _gaussian_kernel_matrix(x, y, sigmas):
     return k
 
 
-def _mmd(embedding):
-    z = torch.randn_like(embedding)
+def _mmd(embedding, n_samples: int = None):
+    if n_samples is None:
+        z = torch.randn_like(embedding)
+    else:
+        z = torch.randn(n_samples, embedding.shape[1]).to(embedding.device)
+
     sigmas = [
         1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1, 5, 10, 15, 20, 25, 30, 35, 100,
         1e3, 1e4, 1e5, 1e6

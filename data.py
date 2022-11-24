@@ -1,5 +1,5 @@
 
-from torch.utils.data import Dataset, TensorDataset
+from torch.utils.data import Dataset, TensorDataset, Subset
 
 
 class SingleTensorDataset(TensorDataset):
@@ -31,13 +31,39 @@ class ProductSet(Dataset):
         return self.d1[i], self.d2[j]
 
 
+class LazyDataset(Dataset):
+    """ Dataset which can lazily load objects on request """
+    def __init__(self):
+        super().__init__()
+        self.items = {}
+
+    def __getitem__(self, item):
+        """ Load or fetch the value corresponding to the item """
+        if item in self.items:
+            return self.items[item]
+
+        value = self.load(item)
+        self.items[item] = value
+
+        return value
+
+    def __len__(self):
+        raise NotImplementedError
+
+    def load(self, item):
+        """ Load and return the value corresponding to the item """
+        raise NotImplementedError
+
+    def clear(self):
+        """ Clear items to free memory """
+        self.items.clear()
+
+
 import pathlib
-import trimesh
 import torch
-import numpy as np
 
 
-class MeshDataset(Dataset):
+class MeshDataset(LazyDataset):
     ALL_SHAPES = [
         "bathtub",
         "bed",
@@ -69,23 +95,27 @@ class MeshDataset(Dataset):
 
         for shape in self.shapes:
             path = self.root / shape / self.split
-            files = list(path.glob("*.off"))
+            files = list(path.glob("*.pt"))
 
             self.shape_counts[shape] = len(files)
 
     def __getitem__(self, item):
-        shape, item = self.shape_item(item)
-        shape = pathlib.Path(shape)
+        points = super().__getitem__(item)
 
-        path = self.root / shape / self.split / f"{shape}_{item + 1:04d}.off"
+        indices = torch.randperm(len(points))[:self.samples]
 
-        mesh = trimesh.load(path)
-        points = mesh.sample(self.samples).astype(np.float32)
-
-        return torch.from_numpy(points)
+        return points[indices]
 
     def __len__(self):
         return sum(self.shape_counts.values())
+
+    def load(self, item):
+        shape, item = self.shape_item(item)
+        shape = pathlib.Path(shape)
+
+        path = self.root / shape / self.split / f"{shape}_{item + 1:04d}.pt"
+
+        return torch.load(path)
 
     def shape_item(self, item):
         """ Find the shape and corresponding index for a raw index """

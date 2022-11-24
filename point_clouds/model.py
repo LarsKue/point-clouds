@@ -6,8 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
-
-from torchvision.datasets import MNIST
+import warnings
 
 import utils
 import losses
@@ -23,15 +22,19 @@ class PointCloudsModule(lightning.LightningModule):
     def default_hparams(self):
         return dict(
             input_dim=0,
+            input_points=0,
             condition_dim=0,
             batch_size=1,
             sample_size=1,
+            mmd_samples=None,
             optimizer="adam",
             learning_rate=1e-3,
             weight_decay=1e-5,
-            encoder_widths=[],
+            encoder_widths=[[], []],
             rectifier_widths=[],
+            encoder="deterministic",
             activation="relu",
+            pooling="mean",
             integrator="euler",
             beta=0.5,
         )
@@ -53,9 +56,10 @@ class PointCloudsModule(lightning.LightningModule):
 
     def inference_step(self, batch, batch_idx=None):
         # (shapes, points, dim)
-        points = utils.normalize(batch)
+        points = utils.normalize(batch, dim=1)
 
         n_shapes, n_points, n_dim = points.shape
+        n_samples = self.hparams.sample_size
 
         # (shapes, points, dim)
         target_noise = self.rectifier_distribution.sample((n_shapes, n_points)).to(self.device)
@@ -63,24 +67,37 @@ class PointCloudsModule(lightning.LightningModule):
         # (shapes, condition_dim)
         condition = self.encoder.forward(points)
 
-        # (shapes, 1, 1)
-        time = torch.rand(n_shapes).to(self.device)
+        # (samples * shapes, 1, 1)
+        time = torch.rand(n_samples * n_shapes).to(self.device)
         time = utils.unsqueeze_as(time, points)
 
-        # (shapes, points, dim)
+        target_noise = utils.repeat_dim(target_noise, n_samples, dim=0)
+        points = utils.repeat_dim(points, n_samples, dim=0)
+        condition = utils.repeat_dim(condition, n_samples, dim=0)
+
+        # (samples * shapes, points, dim)
         interpolation = time * target_noise + (1 - time) * points
 
-        # (shapes, points, dim)
+        # (samples * shapes, points, dim)
         v = self.rectifier.velocity(interpolation, time=time, condition=condition)
 
-        # (shapes, points, dim)
+        # (samples *A shapes, points, dim)
         v_target = target_noise - points
 
-        # (shapes, condition_dim)
-        encoder_noise = self.encoder_distribution.sample((n_shapes,)).to(self.device)
+        # (samples * shapes, condition_dim)
+        mmd_samples = self.hparams.mmd_samples or n_shapes * n_samples
+        encoder_noise = self.encoder_distribution.sample((mmd_samples,)).to(self.device)
+        mmd_loss = losses.mmd(condition, encoder_noise)
 
-        # encoder_loss = losses.mmd(condition[:, 0], encoder_noise)
-        encoder_loss = losses._mmd(condition)
+        match self.hparams.encoder.lower():
+            case "probabilistic":
+                log_prob = torch.mean(self.encoder_distribution.log_prob(condition))
+                Lambda = self.hparams.Lambda
+                encoder_loss = Lambda * mmd_loss - (1 - Lambda) * log_prob
+            case "deterministic":
+                encoder_loss = mmd_loss
+            case encoder:
+                raise NotImplementedError(f"Unsupported Encoder: {encoder}")
 
         # (,)
         rectifier_loss = F.mse_loss(v, v_target)
@@ -89,6 +106,28 @@ class PointCloudsModule(lightning.LightningModule):
 
     def sample(self, n_shapes: int, n_points: int, steps: int = 100):
         condition = self.encoder_distribution.sample((n_shapes,)).to(self.device)
+
+        noise = self.rectifier_distribution.sample((n_shapes, n_points)).to(self.device)
+
+        points, _time = self.rectifier.inverse(noise, condition=condition, steps=steps)
+
+        return points
+
+    def sample_shapes(self, n_shapes: int, n_points: int, steps: int = 100):
+        """ Sample with fixed latent noise """
+        condition = self.encoder_distribution.sample((n_shapes,)).to(self.device)
+
+        noise = self.rectifier_distribution.sample((1, n_points)).to(self.device)
+        noise = utils.repeat_dim(noise, n_shapes, dim=0)
+
+        points, _time = self.rectifier.inverse(noise, condition=condition, steps=steps)
+
+        return points
+
+    def sample_variations(self, n_shapes: int, n_points: int, steps: int = 100):
+        """ Sample with fixed conditional """
+        condition = self.encoder_distribution.sample((1,)).to(self.device)
+        condition = utils.repeat_dim(condition, n_shapes, dim=0)
 
         noise = self.rectifier_distribution.sample((n_shapes, n_points)).to(self.device)
 
@@ -116,8 +155,9 @@ class PointCloudsModule(lightning.LightningModule):
 
     def configure_encoder(self):
         input_dim = self.hparams.input_dim
+        input_points = self.hparams.input_points
         condition_dim = self.hparams.condition_dim
-        widths = self.hparams.encoder_widths
+        pre_widths, post_widths = self.hparams.encoder_widths
 
         match self.hparams.activation.lower():
             case "relu":
@@ -129,25 +169,73 @@ class PointCloudsModule(lightning.LightningModule):
             case activation:
                 raise NotImplementedError(f"Unsupported Activation: {activation}")
 
-        network = nn.Sequential()
+        pre_pool = nn.Sequential()
 
-        input_layer = nn.Conv1d(in_channels=input_dim, out_channels=widths[0], kernel_size=1, padding="same")
-        network.add_module("Input Layer", input_layer)
+        input_layer = nn.Conv1d(in_channels=input_dim, out_channels=pre_widths[0], kernel_size=1)
+        pre_pool.add_module("Pre-Pooling Input Layer", input_layer)
+        pre_pool.add_module("Pre-Pooling Input Activation", Activation())
 
-        activation = Activation()
-        network.add_module("Input Activation", activation)
+        for i in range(len(pre_widths) - 1):
+            hidden_layer = nn.Conv1d(in_channels=pre_widths[i], out_channels=pre_widths[i + 1], kernel_size=1)
+            pre_pool.add_module(f"Pre-Pooling Hidden Layer {i}", hidden_layer)
+            pre_pool.add_module(f"Pre-Pooling Hidden Activation {i}", Activation())
 
-        for i in range(len(widths) - 1):
-            hidden_layer = nn.Conv1d(in_channels=widths[i], out_channels=widths[i + 1], kernel_size=1, padding="same")
-            network.add_module(f"Hidden Layer {i}", hidden_layer)
+        match self.hparams.encoder.lower():
+            case "deterministic":
+                out_channels = post_widths[0]
+            case "probabilistic":
+                out_channels = 2 * post_widths[0]
+            case encoder:
+                raise NotImplementedError(f"Unsupported Encoder: {encoder}")
 
-            activation = Activation()
-            network.add_module(f"Hidden Activation {i}", activation)
+        output_layer = nn.Conv1d(in_channels=pre_widths[-1], out_channels=out_channels, kernel_size=1)
+        pre_pool.add_module("Pre-Pooling Output Layer", output_layer)
 
-        output_layer = nn.Conv1d(in_channels=widths[-1], out_channels=2 * condition_dim, kernel_size=1, padding="same")
-        network.add_module("Output Layer", output_layer)
+        match self.hparams.pooling.lower():
+            case "mean":
+                def pool(x):
+                    return torch.mean(x, dim=-1)
+            case "max":
+                def pool(x):
+                    return torch.max(x, dim=-1)[0]
+            case pooling:
+                raise NotImplementedError(f"Unsupported Pooling: {pooling}")
 
-        return Encoder(network)
+        post_pool = nn.Sequential()
+
+        for i in range(len(post_widths) - 1):
+            hidden_layer = nn.Linear(in_features=post_widths[i], out_features=post_widths[i + 1])
+            post_pool.add_module(f"Post-Pooling Hidden Layer {i}", hidden_layer)
+            post_pool.add_module(f"Post-Pooling Hidden Activation {i}", Activation())
+
+        output_layer = nn.Linear(in_features=post_widths[-1], out_features=condition_dim)
+        post_pool.add_module("Post-Pooling Output Layer", output_layer)
+
+        return Encoder(pre_pool=pre_pool, pool=pool, post_pool=post_pool, kind=self.hparams.encoder)
+
+    def test_encoder(self, n_shapes: int = 10, seed: int = 42):
+        # test permutation invariance of the encoder
+        n_points = self.hparams.input_points
+
+        points = self.rectifier_distribution.sample((n_shapes, n_points)).to(self.device)
+
+        torch.manual_seed(seed)
+        condition = self.encoder.forward(points)
+
+        perm = torch.randperm(points.shape[1])
+        permuted = points[:, perm]
+
+        torch.manual_seed(seed)
+        permuted_condition = self.encoder.forward(permuted)
+
+        close = torch.isclose(condition, permuted_condition)
+        if not torch.all(close):
+            max_dev = torch.max(torch.abs(condition - permuted_condition))
+            n_close = close.sum()
+            n = condition.numel()
+            percentage_close = 100.0 * n_close / n
+            warnings.warn(f"Encoder may be misspecified. {n_close}/{n} elements close ({percentage_close:.2f}%). "
+                          f"Max deviation: {max_dev:.2e}")
 
     def configure_rectifier(self):
         input_dim = self.hparams.input_dim
@@ -169,16 +257,12 @@ class PointCloudsModule(lightning.LightningModule):
         # input is x, time, condition
         input_layer = nn.Linear(in_features=input_dim + 1 + condition_dim, out_features=widths[0])
         network.add_module("Input Layer", input_layer)
-
-        activation = Activation()
-        network.add_module("Input Activation", activation)
+        network.add_module("Input Activation", Activation())
 
         for i in range(len(widths) - 1):
             hidden_layer = nn.Linear(in_features=widths[i], out_features=widths[i + 1])
             network.add_module(f"Hidden Layer {i}", hidden_layer)
-
-            activation = Activation()
-            network.add_module(f"Hidden Activation {i}", activation)
+            network.add_module(f"Hidden Activation {i}", Activation())
 
         # output is velocity
         output_layer = nn.Linear(in_features=widths[-1], out_features=input_dim)
@@ -223,6 +307,15 @@ class PointCloudsModule(lightning.LightningModule):
                 raise NotImplementedError(f"Unsupported Optimizer: {optimizer}")
 
         return optimizer
+
+    def configure_callbacks(self):
+        """
+        Configure and return train callbacks for Lightning
+        """
+        return [
+            lightning.callbacks.ModelCheckpoint(monitor="validation_loss", save_last=True),
+            lightning.callbacks.LearningRateMonitor(),
+        ]
 
     def train_dataloader(self):
         """
