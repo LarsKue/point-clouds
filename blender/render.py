@@ -5,18 +5,17 @@ try:
 except ModuleNotFoundError:
     raise RuntimeError(f"Must run from Blender.")
 
-import importlib
 import pathlib
 import subprocess as sub
 import sys
 import os
-import numpy as np
 
 
 try:
     # FOR SOME REASON this loads all the modules
     help("modules")
     import torch
+    import numpy as np
 except ModuleNotFoundError:
     import ensurepip
 
@@ -26,12 +25,13 @@ except ModuleNotFoundError:
     target = pathlib.Path(sys.executable).parents[1] / "lib" / "python3.10" / "site-packages"
 
     # install requirements
-    args = [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", f"--target={target}"]
+    args = [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"]# , f"--target={target}"]
     sub.run(args)
 
     # reimport requirements
     help("modules")
     import torch
+    import numpy as np
 
 sys.path.append(".")
 torch.autograd.set_grad_enabled(False)

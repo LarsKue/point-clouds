@@ -18,7 +18,7 @@ class Integrator:
 
 
 class EulerIntegrator(Integrator):
-    def step(self, f: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], x: torch.Tensor, t: torch.Tensor, dt: float) -> Tuple[torch.Tensor, torch.Tensor]:
+    def step(self, f: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], x: torch.Tensor, t: torch.Tensor, dt: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         return x + f(x, t) * dt, t + dt
 
 

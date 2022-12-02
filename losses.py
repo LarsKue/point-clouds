@@ -2,6 +2,18 @@ import torch
 
 
 def gaussian_kernel(x1: torch.Tensor, x2: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """
+    Gaussian Kernel, also called Radial-Basis Function.
+    Parameters
+    ----------
+    x1: Tensor of shape (N, D)
+    x2: Tensor of shape (M, D)
+    scales: Tensor of shape (K,)
+
+    Returns
+    -------
+    Gaussian distance between x1 and x2
+    """
     # x1: (N, D)
     # x2: (M, D)
     # scales: (K,)
@@ -19,14 +31,30 @@ def gaussian_kernel(x1: torch.Tensor, x2: torch.Tensor, scales: torch.Tensor) ->
     return torch.sum(torch.exp(-exponent), dim=-1)
 
 
-def mmd(x1: torch.Tensor, x2: torch.Tensor, kernel=gaussian_kernel):
-    # x1: (N, D)
-    # x2: (M, D)
+def mmd(data: torch.Tensor, code: torch.Tensor, kernel=gaussian_kernel, scales: torch.Tensor = "all"):
+    """
+    Compute the Maximum-Mean-Discrepancy (MMD) between samples from two distributions
+    Parameters
+    ----------
+    data: Samples from the data distrbution. Tensor of shape (N, D)
+    code: Samples from the latent distribution. Tensor of shape (M, D)
+    kernel: Kernel distance function to use
+    scales: Characteristic scales used in the kernel function. Tensor of shape (K,)
 
-    scales = torch.logspace(-6, 6, 30).to(x1.device)
-    l1 = torch.mean(kernel(x1, x1, scales=scales))
-    l2 = torch.mean(kernel(x2, x2, scales=scales))
-    l3 = torch.mean(kernel(x1, x2, scales=scales))
+    Returns
+    -------
+    mmd: Maximum-Mean-Discrepancy between data and code
+    """
+
+    if scales == "all":
+        scales = torch.logspace(-6, 6, 30)
+
+    code = code.to(data.device)
+    scales = scales.to(data.device)
+
+    l1 = torch.mean(kernel(data, data, scales=scales))
+    l2 = torch.mean(kernel(code, code, scales=scales))
+    l3 = torch.mean(kernel(data, code, scales=scales))
 
     # out: (,)
     return l1 + l2 - 2.0 * l3
