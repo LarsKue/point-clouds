@@ -2,11 +2,12 @@
 import pytorch_lightning as lightning
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 
 import warnings
 
 import losses
-from .utils import make_conv, make_dense
+from .utils import get_activation
 from .pools import *
 
 
@@ -19,10 +20,9 @@ class Encoder(lightning.LightningModule):
             conditions=0,
             kind="deterministic",
             dropout=None,
-            batchnorm=False,
             widths=[[], []],
             activation="relu",
-            pooling="mean",
+            checkpoints=None,
             Lambda=0.5,
         )
 
@@ -32,16 +32,10 @@ class Encoder(lightning.LightningModule):
 
         self.save_hyperparameters(hparams)
 
-        self.encode = self.configure_encode()
-        self.post_encode = self.configure_post_pool()
-
-        # self.pre_pool = self.configure_pre_pool()
-        # self.pool = self.configure_pool()
-        # self.post_pool = self.configure_post_pool()
+        self.network = self.configure_network()
 
         self.distribution = self.configure_distribution()
 
-        # self._test_permutation_equivariance()
         self._test_permutation_invariance()
 
     def forward(self, x: torch.Tensor):
@@ -55,37 +49,30 @@ class Encoder(lightning.LightningModule):
         -------
         condition: Tensor of shape (shapes, conditions)
         """
-        x = x.movedim(1, -1)
-
-        print(f"{x.shape=}")
-        z = self.encode(x)
-        z = self.post_encode(z)
-
-        return z
-
-        # z.shape == (shapes, ..., points), permutation-equivariant
-        z = self.pre_pool(x)
-
-        # pooled.shape == (shapes, ...), permutation-invariant
-        pooled = self.pool(z)
+        if not self.training or not self.hparams.checkpoints:
+            output = self.network(x)
+        else:
+            if self.hparams.checkpoints is True:
+                output = checkpoint(
+                    self.network,
+                    x,
+                    use_reentrant=False,
+                )
+            else:
+                output = checkpoint_sequential(
+                    functions=self.network,
+                    segments=self.hparams.checkpoints,
+                    input=x
+                )
 
         match self.hparams.kind.lower():
             case "deterministic":
                 pass
             case "probabilistic":
-                # mu.shape == sigma.shape == (shapes, conditions)
-                mu, sigma = torch.tensor_split(pooled, 2, dim=1)
+                mu, sigma = torch.tensor_split(output, 2, dim=-1)
+                output = mu + sigma * torch.randn_like(sigma)
 
-                # pooled.shape == (shapes, conditions)
-                pooled = mu + sigma * torch.randn_like(sigma)
-            case kind:
-                raise NotImplementedError(f"Unsupported Encoder: {kind}")
-
-        # out.shape == (shapes, conditions)
-        out = self.post_pool(pooled)
-
-        # out.shape == (shapes, conditions)
-        return out
+        return output
 
     def loss(self, condition: torch.Tensor, samples: int, scales: torch.Tensor = "all"):
         """
@@ -114,109 +101,88 @@ class Encoder(lightning.LightningModule):
             case kind:
                 raise NotImplementedError(f"Unsupported kind: {kind}")
 
-    def configure_pre_pool(self):
-        """ Configure and return the permutation-equivariant pre-pool network """
+    def configure_network(self):
         inputs = self.hparams.inputs
-        widths = self.hparams.widths[0]
+        conditions = self.hparams.conditions
+        dropout = self.hparams.dropout
 
-        match self.hparams.kind.lower():
-            case "deterministic":
-                outputs = widths[-1]
-            case "probabilistic":
-                # x ~ N(mu, sigma)
-                outputs = 2 * widths[-1]
-            case kind:
-                raise NotImplementedError(f"Unsupported kind: {kind}")
+        Activation = get_activation(self.hparams.activation)
 
-        network = make_conv(
-            widths=[inputs, *widths, outputs],
-            activation=self.hparams.activation,
-            batchnorm=self.hparams.batchnorm,
-            dropout=self.hparams.dropout,
-        )
-
-        return network
-
-    def configure_encode(self):
-        inputs = self.hparams.inputs
-        # widths = self.hparams.widths[0]
-
-        # TODO: runs out of memory, yields error "no valid convolution algorithm in cudnn"
         network = nn.Sequential(
-            nn.Conv1d(in_channels=inputs, out_channels=8, kernel_size=1),
-            nn.ReLU(),
-            GlobalMultimaxPool1d(outputs=32),
-            nn.Conv1d(in_channels=8, out_channels=32, kernel_size=1),
-            nn.Flatten()
+            nn.Linear(inputs, 128),
+            Activation(),
+
+            nn.Dropout(dropout),
+            nn.Linear(128, 256),
+            Activation(),
+
+            nn.Dropout(dropout),
+            nn.Linear(256, 512),
+            Activation(),
+
+            GlobalMultimaxPool1d(1024, dim=1),
+
+            nn.Linear(512, 512),
+            Activation(),
+
+            nn.Dropout(dropout),
+            nn.Linear(512, 512),
+            Activation(),
+
+            GlobalMultimaxPool1d(512, dim=1),
+
+            nn.Linear(512, 512),
+            Activation(),
+
+            nn.Dropout(dropout),
+            nn.Linear(512, 512),
+            Activation(),
+
+            GlobalMultimaxPool1d(256, dim=1),
+
+            nn.Linear(512, 256),
+            Activation(),
+
+            nn.Dropout(dropout),
+            nn.Linear(256, 256),
+            Activation(),
+
+            nn.Dropout(dropout),
+            nn.Linear(256, 256),
+            Activation(),
+
+            GlobalAvgPool1d(dim=1),
+
+            nn.Linear(256, 256),
+            Activation(),
+
+            nn.Linear(256, conditions),
         )
 
         # network = nn.Sequential(
-        #     # (3, 2048)
-        #     nn.Conv1d(in_channels=inputs, out_channels=4, kernel_size=1),
+        #     # (batch, 2048, 3)
+        #     nn.Linear(inputs, 128),
         #     nn.ReLU(),
-        #     # (16, 2048)
-        #     GlobalMultimaxPool1d(outputs=512),
-        #     # (16, 512)
-        #     nn.Conv1d(in_channels=4, out_channels=8, kernel_size=1),
+        #     # (batch, 2048, 128)
+        #     ISAB(128, 128, num_heads=4, inducing_points=16),
+        #     ISAB(128, 128, num_heads=4, inducing_points=16),
+        #     nn.Dropout(dropout),
+        #     PMA(128, num_heads=4, num_seeds=16),
+        #     nn.Linear(128, 256),
         #     nn.ReLU(),
-        #     # (32, 512)
-        #     GlobalMultimaxPool1d(outputs=128),
-        #     # (32, 128)
-        #     nn.Conv1d(in_channels=8, out_channels=16, kernel_size=1),
+        #     ISAB(256, 256, num_heads=4, inducing_points=32),
+        #     ISAB(256, 256, num_heads=4, inducing_points=32),
+        #     nn.Dropout(dropout),
+        #     PMA(256, num_heads=4, num_seeds=16),
+        #     nn.Linear(256, 256),
         #     nn.ReLU(),
-        #     # (64, 128)
-        #     GlobalMultimaxPool1d(outputs=64),
-        #     # (64, 64)
-        #     nn.Conv1d(in_channels=16, out_channels=32, kernel_size=1),
-        #     nn.ReLU(),
-        #     # (128, 64)
-        #     GlobalMultimaxPool1d(outputs=32),
-        #     # (128, 32)
-        #     nn.Conv1d(in_channels=32, out_channels=32, kernel_size=1),
-        #     nn.ReLU(),
-        #     # (128, 32)
-        #     nn.Conv1d(in_channels=32, out_channels=16, kernel_size=1),
-        #     nn.ReLU(),
-        #     # (64, 32)
-        #     nn.Conv1d(in_channels=16, out_channels=16, kernel_size=1),
-        #     # (32, 32)
-        #     nn.Flatten(),
-        #     # (1024,)
+        #     nn.Linear(256, conditions),
+        #     GlobalAvgPool1d(dim=1),
         # )
 
-        return network
-
-    def configure_pool(self):
-        """ Configure and return the pooling method """
-        pool = nn.Sequential()
-        match self.hparams.pooling.lower():
-            case "max":
-                pool.add_module("Max Pool", GlobalMaxPool1d())
-            case "mean":
-                pool.add_module("Average Pool", GlobalAvgPool1d())
-            case "multimax":
-                pool.add_module("Multimax Pool", GlobalMultimaxPool1d(outputs=self.hparams.pools))
-            case "stats":
-                pool.add_module("Statistics Pool", GlobalStatisticsPool1d())
-            case pooling:
-                raise NotImplementedError(f"Unsupported Pooling: {pooling}")
-
-        pool.add_module("Flatten", nn.Flatten())
-
-        return pool
-
-    def configure_post_pool(self):
-        """ Configure and return the post pool network """
-        inputs = self.hparams.pools * self.hparams.widths[0][-1]
-        conditions = self.hparams.conditions
-        widths = self.hparams.widths[1]
-
-        network = make_dense(
-            widths=[inputs, *widths, conditions],
-            activation=self.hparams.activation,
-            batchnorm=self.hparams.batchnorm,
-            dropout=self.hparams.dropout,
-        )
+        x = torch.randn(10, self.hparams.points, self.hparams.inputs)
+        z = network.forward(x)
+        assert z.shape == (10, conditions)
 
         return network
 
@@ -224,33 +190,6 @@ class Encoder(lightning.LightningModule):
         loc = torch.zeros(self.hparams.conditions).cuda()
         scale = torch.ones(self.hparams.conditions).cuda()
         return torch.distributions.Normal(loc, scale)
-
-    @torch.no_grad()
-    def _test_permutation_equivariance(self, shapes=10, points=128):
-        train = self.training
-        self.eval()
-        permutation = torch.randperm(points)
-        inverse_permutation = torch.argsort(permutation)
-
-        x = torch.randn(shapes, self.hparams.inputs, points)
-        xp = x[:, :, permutation]
-
-        z = self.pre_pool.forward(x)
-        zp = self.pre_pool.forward(xp)
-
-        zz = zp[:, :, inverse_permutation]
-
-        close = torch.isclose(z, zz, atol=1e-7)
-        if not torch.all(close):
-            max_dev = torch.max(torch.abs(z - zz))
-            n_close = close.sum()
-            n = z.numel()
-            percentage_close = 100.0 * n_close / n
-            warnings.warn(f"Encoder Pre-Pool may not be permutation-equivariant. "
-                          f"{n_close}/{n} elements close ({percentage_close:.2f}%). "
-                          f"Max deviation: {max_dev:.2e}")
-
-        self.train(train)
 
     @torch.no_grad()
     def _test_permutation_invariance(self, shapes=10):

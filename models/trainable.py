@@ -18,7 +18,9 @@ class Trainable(lightning.LightningModule):
             weight_decay=1e-5,
             batch_size=1,
             accumulate_batches=None,
+            track_grad_norm=2,
             gradient_clip=None,
+            profiler=None,
         )
 
     def __init__(self, train_data: Dataset = None, val_data: Dataset = None, test_data: Dataset = None, **hparams):
@@ -29,6 +31,24 @@ class Trainable(lightning.LightningModule):
         self.train_data = train_data
         self.val_data = val_data
         self.test_data = test_data
+
+    def loss(self, batch, batch_idx) -> torch.Tensor:
+        """ Compute the loss on the given batch """
+        raise NotImplementedError
+
+    def training_step(self, batch, batch_idx):
+        loss = self.loss(batch, batch_idx)
+        self.log("training_loss", loss)
+
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        loss = self.loss(batch, batch_idx)
+        self.log("validation_loss", loss)
+
+    def test_step(self, batch, batch_idx):
+        loss = self.loss(batch, batch_idx)
+        self.log("test_loss", loss)
 
     def configure_optimizers(self):
         """
@@ -44,14 +64,19 @@ class Trainable(lightning.LightningModule):
             case optimizer:
                 raise NotImplementedError(f"Unsupported Optimizer: {optimizer}")
 
-        return optimizer
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=100, T_mult=2, eta_min=1e-6)
+
+        return dict(
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+        )
 
     def configure_callbacks(self):
         """
         Configure and return train callbacks for Lightning
         """
         return [
-            lightning.callbacks.ModelCheckpoint(monitor="validation_loss", save_last=True),
+            lightning.callbacks.ModelCheckpoint(monitor="validation_loss", save_last=True, every_n_epochs=25, save_top_k=5),
             lightning.callbacks.LearningRateMonitor(),
         ]
 
@@ -101,6 +126,7 @@ class Trainable(lightning.LightningModule):
             max_epochs=self.hparams.max_epochs,
             gradient_clip_val=self.hparams.gradient_clip,
             accumulate_grad_batches=self.hparams.accumulate_batches,
-            track_grad_norm=2,
+            track_grad_norm=self.hparams.track_grad_norm,
+            profiler=self.hparams.profiler,
             benchmark=True,
         )

@@ -1,15 +1,15 @@
 
-import pytorch_lightning as lightning
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.distributions as D
 from torch.utils.checkpoint import checkpoint, checkpoint_sequential
+
+import pytorch_lightning as lightning
 
 from typing import Tuple
 
-from integrators import EulerIntegrator, RK45Integrator
-from .utils import make_dense
-
+from models.utils import make_dense
+import integrators
 import utils
 
 
@@ -17,27 +17,27 @@ class Rectifier(lightning.LightningModule):
 
     @property
     def default_hparams(self):
-        return dict(
+        return super().default_hparams | dict(
             inputs=0,
             conditions=0,
+            time_samples=1,
             dropout=None,
             widths=[],
             activation="relu",
             checkpoints=None,
             integrator="euler",
+            distribution="normal",
+            norm=2,
         )
 
-    def __init__(self, **hparams):
-        super().__init__()
-        # TODO: check if these need to be saved here or in wrapping class
-        hparams = self.default_hparams | hparams
-        self.save_hyperparameters(hparams)
+    def __init__(self, *datasets, **hparams):
+        super().__init__(*datasets, **hparams)
 
         self.network = self.configure_network()
-        self.integrator = self.configure_integrator()
         self.distribution = self.configure_distribution()
+        self.integrator = self.configure_integrator()
 
-    def forward(self, x: torch.Tensor, condition: torch.Tensor = torch.Tensor(), steps: int = 100) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, condition: torch.Tensor = None, steps: int = 100) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Perform a full forward integration for given data point x and shape condition
         Parameters
@@ -59,7 +59,7 @@ class Rectifier(lightning.LightningModule):
 
         return self.integrator.solve(v, x0=x, t0=t0, dt=dt, steps=steps)
 
-    def inverse(self, z: torch.Tensor, condition: torch.Tensor = torch.Tensor(), steps: int = 100) -> Tuple[torch.Tensor, torch.Tensor]:
+    def inverse(self, z: torch.Tensor, condition: torch.Tensor = None, steps: int = 100) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Perform a full inverse integration for given latent point z and shape condition
         Parameters
@@ -81,30 +81,33 @@ class Rectifier(lightning.LightningModule):
 
         return self.integrator.solve(v, x0=z, t0=t0, dt=dt, steps=steps)
 
-    def velocity(self, x: torch.Tensor, time: torch.Tensor, condition: torch.Tensor = torch.Tensor()) -> torch.Tensor:
+    def velocity(self, x: torch.Tensor, time: torch.Tensor, condition: torch.Tensor = None) -> torch.Tensor:
         """
         Compute the velocity field at given point and time for a given condition
         Parameters
         ----------
-        x: Tensor of shape (shapes, points, dim)
-        time: Tensor of shape (shapes, 1, 1)
-        condition: Tensor of shape (shapes, conditions)
+        x: Tensor of shape (batch_size, inputs) or (batch_size, sequence_size, inputs)
+        time: Tensor of shape (batch_size,)
+        condition: Tensor of shape (batch_size, conditions)
 
         Returns
         -------
-        velocity: Tensor of shape (shapes, points, dim)
+        velocity: Tensor of shape (batch_size, inputs) or (batch_size, sequence_size, inputs)
         """
-        n_shapes, n_points, n_dim = x.shape
+        time = utils.unsqueeze_as(time, x)
 
-        # (shapes, points, 1)
-        time = utils.repeat_dim(time, n_points, dim=1)
-        # (shapes, points, condition_dim)
-        condition = utils.repeat_dim(condition.unsqueeze(1), n_points, dim=1)
+        if x.dim() == 3:
+            # repeat condition and time for sequence
+            sequence_size = x.shape[1]
+            time = utils.repeat_dim(time, sequence_size, dim=1)
+            if condition:
+                condition = utils.repeat_dim(condition.unsqueeze(1), sequence_size, dim=1)
 
-        # (shapes, points, dim + 1 + condition_dim)
-        xtc = torch.cat((x, time, condition), dim=-1)
+        if condition:
+            xtc = torch.cat((x, time, condition), dim=-1)
+        else:
+            xtc = torch.cat((x, time), dim=-1)
 
-        # velocity.shape == (shapes, points, dim)
         if not self.training or not self.hparams.checkpoints:
             velocity = self.network(xtc)
         else:
@@ -121,46 +124,9 @@ class Rectifier(lightning.LightningModule):
                     input=xtc
                 )
 
-        # velocity.shape == (shapes, points, dim)
         return velocity
 
-    def loss(self, points: torch.Tensor, condition: torch.Tensor, samples: int):
-        """
-        Compute the loss for the rectifier
-        Parameters
-        ----------
-        points: The input points to the rectifier. Tensor of shape (shapes, points, dim)
-        condition: The input condition. Tensor of shape (shapes, conditions)
-        samples: How many time samples to use.
-
-        Returns
-        -------
-        loss: Tensor of shape ()
-        """
-        n_shapes, n_points, dim = points.shape
-
-        target_noise = self.distribution.sample((n_shapes, n_points)).to(self.device)
-
-        # (samples * shapes, 1, 1)
-        time = torch.rand(samples * n_shapes).to(self.device)
-        time = utils.unsqueeze_as(time, points)
-
-        target_noise = utils.repeat_dim(target_noise, samples, dim=0)
-        points = utils.repeat_dim(points, samples, dim=0)
-        condition = utils.repeat_dim(condition, samples, dim=0)
-
-        # (samples * shapes, points, dim)
-        interpolation = time * target_noise + (1 - time) * points
-
-        # (samples * shapes, points, dim)
-        v = self.velocity(interpolation, time=time, condition=condition)
-
-        # (samples * shapes, points, dim)
-        v_target = target_noise - points
-
-        return F.mse_loss(v, v_target)
-
-    def configure_network(self):
+    def configure_network(self) -> nn.Module:
         """
         Configure and Return the Network to use based on hparams
         Returns
@@ -179,19 +145,27 @@ class Rectifier(lightning.LightningModule):
 
         return network
 
-    def configure_integrator(self):
+    def configure_distribution(self) -> D.Distribution:
+        inputs = self.hparams.inputs
+
+        match self.hparams.distribution.lower():
+            case "normal" | "gaussian":
+                return D.Normal(torch.zeros(inputs), torch.ones(inputs))
+            case "student-t":
+                return D.StudentT(inputs - 1, torch.zeros(inputs), torch.ones(inputs))
+            case "uniform":
+                return D.Uniform(-torch.ones(inputs), torch.ones(inputs))
+            case distribution:
+                raise NotImplementedError(f"Unknown distribution: {distribution}")
+
+    def configure_integrator(self) -> integrators.Integrator:
         """ Configure and return integrator used for inference """
         match self.hparams.integrator.lower():
             case "euler":
-                integrator = EulerIntegrator()
+                integrator = integrators.EulerIntegrator()
             case "rk45":
-                integrator = RK45Integrator()
+                integrator = integrators.RK45Integrator()
             case integrator:
                 raise NotImplementedError(f"Unsupported Integrator: {integrator}")
 
         return integrator
-
-    def configure_distribution(self):
-        loc = torch.zeros(self.hparams.inputs).cuda()
-        scale = torch.ones(self.hparams.inputs).cuda()
-        return torch.distributions.Normal(loc, scale)

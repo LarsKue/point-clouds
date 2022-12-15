@@ -98,3 +98,9 @@ def normalize(x: torch.Tensor, dim: int = 0) -> torch.Tensor:
     std = torch.std(x, dim=dim, keepdim=True)
 
     return (x - mean) / std
+
+
+def augment(points: torch.Tensor, noise: float = 0.05) -> torch.Tensor:
+    noise = noise * torch.randn_like(points)
+
+    return noise + points

@@ -1,7 +1,10 @@
 
 import torch.nn as nn
 
+import numpy as np
+
 import warnings
+from .pools import GlobalMultimaxPool1d
 
 
 def get_activation(activation):
@@ -16,16 +19,21 @@ def get_activation(activation):
             raise NotImplementedError(f"Unsupported Activation: {activation}")
 
 
-def make_conv(widths: list[int], activation: str, batchnorm: bool = False, dropout: float = None):
+def get_pool(pool):
+    match pool.lower():
+        case "multimax":
+            return GlobalMultimaxPool1d
+        case pool:
+            raise NotImplementedError(f"Unsupported Pool: {pool}")
+
+
+def make_conv(widths: list[int], activation: str, dropout: float = None):
     if len(widths) < 2:
         raise ValueError(f"Need at least Input and Output Layer.")
     elif len(widths) < 3:
         warnings.warn(f"Should use more than zero hidden layers.")
 
     Activation = get_activation(activation)
-
-    if dropout is not None and batchnorm:
-        warnings.warn("Should only use one of dropout or batchnorm.")
 
     network = nn.Sequential()
 
@@ -34,8 +42,6 @@ def make_conv(widths: list[int], activation: str, batchnorm: bool = False, dropo
     network.add_module("Input Activation", Activation())
 
     for i in range(1, len(widths) - 2):
-        if batchnorm:
-            network.add_module(f"Batchnorm {i}", nn.BatchNorm1d(num_features=widths[i]))
         if dropout is not None:
             network.add_module(f"Dropout {i}", nn.Dropout1d(p=dropout))
         hidden_layer = nn.Conv1d(in_channels=widths[i], out_channels=widths[i + 1], kernel_size=1)
@@ -48,16 +54,13 @@ def make_conv(widths: list[int], activation: str, batchnorm: bool = False, dropo
     return network
 
 
-def make_dense(widths: list[int], activation: str, batchnorm: bool = False, dropout: float = None):
+def make_dense(widths: list[int], activation: str, dropout: float = None):
     if len(widths) < 2:
         raise ValueError(f"Need at least Input and Output Layer.")
     elif len(widths) < 3:
         warnings.warn(f"Should use more than zero hidden layers.")
 
     Activation = get_activation(activation)
-
-    if dropout is not None and batchnorm:
-        warnings.warn("Should only use one of dropout or batchnorm.")
 
     network = nn.Sequential()
 
@@ -67,8 +70,6 @@ def make_dense(widths: list[int], activation: str, batchnorm: bool = False, drop
     network.add_module("Input Activation", Activation())
 
     for i in range(1, len(widths) - 2):
-        if batchnorm:
-            network.add_module(f"Batchnorm {i}", nn.BatchNorm1d(num_features=widths[i]))
         if dropout is not None:
             network.add_module(f"Dropout {i}", nn.Dropout1d(p=dropout))
         hidden_layer = nn.Linear(in_features=widths[i], out_features=widths[i + 1])
