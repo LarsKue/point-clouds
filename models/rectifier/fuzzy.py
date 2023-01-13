@@ -4,6 +4,7 @@ from torch.utils.data import TensorDataset
 
 from .base import Rectifier
 from models.trainable import Trainable
+from models.utils import fuzzy_match
 
 import utils
 
@@ -44,24 +45,10 @@ class FuzzyRectifier(Rectifier, Trainable):
     def rectify(self, condition: torch.Tensor = None, steps: int = 100, samples: int = None):
         x = self.train_data.tensors[0].to(self.device)
 
-        # simulated latent data
         simulated, _ = self.forward(x, condition=condition, steps=steps)
-
-        # match simulated to sampled data
-        # TODO: more samples according to `samples` parameter
         sampled = self.distribution.sample(simulated.shape[:-1]).to(self.device)
 
-        simulated = torch.flatten(simulated, 0, -2)
-        sampled = torch.flatten(sampled, 0, -2)
-
-        # fuzzy match: use nearest sample to recompute
-        residuals = simulated[None, :] - sampled[:, None]
-        norms = torch.linalg.norm(residuals, ord=self.hparams.norm, dim=-1)
-
-        values, indices = torch.topk(-norms.ravel(), k=torch.prod(torch.tensor(sampled.shape[:-1], dtype=torch.int64)).item())
-        values = -values
-
-        means = sampled[indices].reshape_as(x)
-        stds = values.reshape_as(x)
+        # find means and stds of fuzzy match
+        means, stds = fuzzy_match(sampled, simulated)
 
         self.train_data.tensors = [x, means, stds]

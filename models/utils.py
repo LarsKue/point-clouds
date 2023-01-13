@@ -2,6 +2,8 @@
 import torch.nn as nn
 
 import numpy as np
+import jax.numpy as jnp
+from jax import jit, vmap
 
 import warnings
 from .pools import GlobalMultimaxPool1d
@@ -81,3 +83,39 @@ def make_dense(widths: list[int], activation: str, dropout: float = None):
     network.add_module("Output Layer", output_layer)
 
     return network
+
+
+def find_closest(x: jnp.array, ys: jnp.array) -> (jnp.array, jnp.array):
+    """ Find the closest y to x """
+    residuals = x[None] - ys
+    norms = jnp.linalg.norm(residuals, axis=-1)
+
+    i = jnp.argmin(norms, axis=0)
+
+    return ys[i], norms[i]
+
+find_closest = jit(vmap(find_closest, in_axes=(0, None)))
+
+
+def fuzzy_match(xs: np.array, ys: np.array, batch_size: int = None) -> (np.array, np.array):
+    """ Find means and standard deviations for a fuzzy matching of y in x """
+    xs = xs.reshape(-1, xs.shape[-1])
+    ys = ys.reshape(-1, ys.shape[-1])
+
+    if batch_size is None:
+        means, stds = find_closest(ys, xs)
+    else:
+        means = []
+        stds = []
+        for start in range(0, len(ys), batch_size):
+            y_batch = ys[start:start + batch_size]
+            mean_batch, std_batch = find_closest(y_batch, xs)
+            means.append(mean_batch)
+            stds.append(std_batch)
+
+        means = np.concatenate(means, axis=0)
+        stds = np.concatenate(stds, axis=0)
+
+    return np.asarray(means), np.asarray(stds)
+
+
