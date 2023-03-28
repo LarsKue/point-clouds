@@ -1,0 +1,2 @@
+
+from .furniture import FurnitureDataset
