@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from old import utils
+from point_clouds import utils
 
 
 class MAB(nn.Module):

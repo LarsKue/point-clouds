@@ -1,5 +1,6 @@
 
 import torch
+from copy import copy
 
 from lightning_trainable.modules import DenseModule, DenseModuleHParams
 
@@ -12,7 +13,7 @@ class RectifierHParams(DenseModuleHParams):
 
     @classmethod
     def validate_parameters(cls, hparams: dict) -> dict:
-        hparams["outputs"] = hparams["inputs"]
+        hparams["outputs"] = copy(hparams["inputs"])
         hparams["inputs"] = hparams["inputs"] + 1 + hparams["conditions"]
 
         hparams = super().validate_parameters(hparams)
@@ -33,6 +34,8 @@ class Rectifier(DenseModule):
         conditions = self.hparams.conditions
         assert condition.shape == (batch_size, 1, conditions)
 
+        time = time.expand(batch_size, points, 1)
+        condition = condition.expand(batch_size, points, conditions)
 
         x = torch.cat((batch, time, condition), dim=2)
         return self.network(x)

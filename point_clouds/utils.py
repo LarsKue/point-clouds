@@ -45,3 +45,16 @@ class temporary_seed:
         np.random.set_state(self.states["numpy"])
         torch.cuda.set_rng_state_all(self.states["cuda"])
         torch.set_rng_state(self.states["cpu"])
+
+
+def normalize(x: torch.Tensor, dim: int = 0) -> torch.Tensor:
+    mean = torch.mean(x, dim=dim, keepdim=True)
+    std = torch.std(x, dim=dim, keepdim=True)
+
+    return (x - mean) / std
+
+
+def augment(points: torch.Tensor, noise: float = 0.05) -> torch.Tensor:
+    noise = noise * torch.randn_like(points)
+
+    return noise + points

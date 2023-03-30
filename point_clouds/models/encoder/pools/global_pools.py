@@ -11,6 +11,15 @@ class GlobalAvgPool1d(nn.Module):
         return torch.mean(x, dim=int(self.dim))
 
 
+class GlobalSumPool1d(nn.Module):
+    def __init__(self, dim=-1):
+        super().__init__()
+        self.register_buffer("dim", torch.tensor(dim, dtype=torch.int32))
+
+    def forward(self, x):
+        return torch.sum(x, dim=int(self.dim))
+
+
 class GlobalMaxPool1d(nn.Module):
     def __init__(self, dim=-1):
         super().__init__()

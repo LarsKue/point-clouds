@@ -1,62 +1,62 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from lightning_trainable.hparams import HParams, Choice
-from lightning_trainable.modules import DenseModule, DenseModuleHParams
-
-from .pools import GlobalAvgPool1d
+from lightning_trainable.hparams import HParams
+from lightning_trainable.modules import HParamsModule, DenseModuleHParams
 
 from point_clouds.utils import temporary_seed
+from .pools import GlobalAvgPool1d, GlobalMultimaxPool1d, GlobalSumPool1d
 
 
-class InvariantEncoderHParams(DenseModuleHParams):
-    equivariant_module: nn.Module
-    pool: str = Choice("mean", "sum")
+class InvariantEncoderHParams(HParams):
+    layers: list
+    """
+    Example: 
+        layers = [
+        {"linear": 128},
+        {"linear": 256},
+        {"multimax": 1024},
+        "mean"
+    ]
+    """
 
 
-class InvariantEncoder(DenseModule):
+class InvariantEncoder(HParamsModule):
     hparams: InvariantEncoderHParams
 
-    def __init__(self, hparams: InvariantEncoderHParams | dict):
+    def __init__(self, hparams: DenseModuleHParams | dict):
         super().__init__(hparams)
 
-        self.encoder = self.hparams.equivariant_module
-        self.pooler = self.configure_pooler()
+        self.network = self.configure_network()
 
     def forward(self, batch) -> torch.Tensor:
         if not torch.is_tensor(batch):
             batch = batch[0]
             assert torch.is_tensor(batch)
 
-        equivariant_encoding = self.encoder(batch)
-        pooled_encoding = self.pooler(equivariant_encoding)
-        transformed_encoding = self.network(pooled_encoding)
+        return self.network(batch).unsqueeze(1)
 
-        return transformed_encoding
+    def configure_network(self):
+        network = nn.Sequential()
 
-    def configure_pooler(self) -> nn.Module:
-        return GlobalAvgPool1d(dim=1)
+        for layer in self.hparams.layers:
+            match layer:
+                case {"linear": width}:
+                    network.append(nn.LazyLinear(width))
+                case {"multimax": width}:
+                    network.append(GlobalMultimaxPool1d(width, dim=1))
+                case "mean":
+                    network.append(GlobalAvgPool1d(dim=1))
+                case "sum":
+                    network.append(GlobalSumPool1d(dim=1))
+                case "relu":
+                    network.append(nn.ReLU())
+                case "gelu":
+                    network.append(nn.GELU())
+                case other:
+                    raise NotImplementedError(f"Unrecognized layer: {other}")
 
-    @temporary_seed(0)
-    def test_equivariance(self, shape: torch.Size | tuple):
-        batch_size, samples, inputs = shape
-
-        permutation = torch.randperm(samples)
-        inverse_permutation = torch.argsort(permutation)
-
-        x = torch.randn(batch_size, samples, inputs)
-        xp = x[:, permutation, :]
-
-        with temporary_seed(0):
-            z = self.encoder(x)
-
-        with temporary_seed(0):
-            zp = self.encoder(xp)
-
-        zz = zp[:, inverse_permutation, :]
-
-        assert torch.allclose(z, zz, atol=1e-7), f"Equivariance not met. MSE = {F.mse_loss(z, zz):.2e}"
+        return network
 
     @temporary_seed(0)
     def test_invariance(self, shape: torch.Size | tuple):

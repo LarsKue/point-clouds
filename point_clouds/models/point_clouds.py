@@ -3,14 +3,19 @@ import torch
 import torch.nn.functional as F
 from lightning_trainable import Trainable, TrainableHParams
 
-from .encoder import InvariantEncoder, InvariantEncoderHParams
-from .rectifier import Rectifier, RectifierHParams
+from .. import utils
+from .encoder import InvariantEncoder
+from .rectifier import Rectifier
 
 
 class PointCloudsModelHParams(TrainableHParams):
+    loss: str = "mse"
+
     inputs: int
     points: int
     conditions: int
+
+    augment_noise: float = 0.05
 
     encoder_hparams: dict
     rectifier_hparams: dict
@@ -26,16 +31,18 @@ class PointCloudsModel(Trainable):
         super().__init__(hparams, **kwargs)
         self.encoder = self.configure_encoder()
         self.rectifier = self.configure_rectifier()
-        self.integrator = self.configure_integrator()
 
     def compute_metrics(self, batch, batch_idx) -> dict:
         if not torch.is_tensor(batch):
             batch = batch[0]
             assert torch.is_tensor(batch)
+        # pre-processing
+        batch = utils.normalize(batch, dim=1)
+        batch = utils.augment(batch, noise=self.hparams.augment_noise)
 
         batch_size, points, dims = batch.shape
 
-        time = torch.rand((batch_size, 1, 1))
+        time = torch.rand((batch_size, 1, 1), device=self.device)
         condition = self.encoder(batch)
         predicted_velocity = self.rectifier.velocity(batch, time, condition)
 
@@ -51,21 +58,15 @@ class PointCloudsModel(Trainable):
     def sample(self, sample_shape=(1, 2048), steps: int = 100) -> torch.Tensor:
         (batch_size, points) = sample_shape
 
-        noise = torch.randn(batch_size, points, self.hparams.inputs)
+        noise = torch.randn(batch_size, points, self.hparams.inputs, device=self.device)
         condition = torch.randn(batch_size, 1, self.hparams.conditions)
 
         return self.rectifier.inverse(noise, condition, steps)
 
     def configure_encoder(self):
-        module = self.hparams.encoder_hparams["equivariant_module"]
-        test_batch = torch.randn(1, self.hparams.points, self.hparams.inputs, device=self.device)
-        test_batch = module(test_batch)
-        hparams = dict(
-            inputs=test_batch.shape[2],
-            outputs=self.hparams.conditions,
-            **self.hparams.encoder_hparams,
-        )
-        return InvariantEncoder(hparams)
+        encoder = InvariantEncoder(self.hparams.encoder_hparams)
+        encoder.test_invariance(shape=(1, self.hparams.points, self.hparams.inputs))
+        return encoder
 
     def configure_rectifier(self):
         hparams = dict(
